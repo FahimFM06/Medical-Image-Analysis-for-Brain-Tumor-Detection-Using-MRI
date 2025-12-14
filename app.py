@@ -1,9 +1,6 @@
-# app.py
-# Streamlit app: Landing page (Next) -> Upload/Result page with Positive/Negative + Grad-CAM XAI (only if Positive)
-
 import os
 import base64
-from typing import Dict, Optional
+from typing import Dict, Tuple
 
 import streamlit as st
 import numpy as np
@@ -11,11 +8,7 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
-
-# XAI (Grad-CAM)
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.model_targets import BinaryClassifierOutputTarget
-from pytorch_grad_cam.utils.image import show_cam_on_image
+import matplotlib.cm as cm
 
 
 # =========================
@@ -25,22 +18,19 @@ st.set_page_config(page_title="Brain Tumor Detection", layout="wide")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Paths (expected in your GitHub repo)
-MODEL_PATH = os.path.join( "efficientnet_brain_tumor_best.pth")
+MODEL_PATH = os.path.join("efficientnet_brain_tumor_best.pth")
 BG_PATH = os.path.join("background.jpg")
 
 IMG_SIZE = 224
-CLASS_NAMES = ["No Tumor", "Tumor"]
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 # =========================
-# Styling Helpers
+# UI Styling Helpers
 # =========================
 def set_bg(image_path: str) -> None:
-    """Sets a full-page background image with a dark overlay. Safe if image missing."""
     if not os.path.exists(image_path):
         return
     with open(image_path, "rb") as f:
@@ -64,7 +54,7 @@ def set_bg(image_path: str) -> None:
     )
 
 
-def inject_home_card_css() -> None:
+def inject_home_css() -> None:
     st.markdown(
         """
         <style>
@@ -100,7 +90,6 @@ def inject_home_card_css() -> None:
 
 
 def set_predict_bg() -> None:
-    """Simple background for prediction page."""
     st.markdown(
         """
         <style>
@@ -112,7 +101,7 @@ def set_predict_bg() -> None:
 
 
 # =========================
-# Model + Preprocessing
+# Preprocessing
 # =========================
 transform = transforms.Compose(
     [
@@ -126,17 +115,16 @@ transform = transforms.Compose(
 @st.cache_resource
 def load_model() -> nn.Module:
     """
-    Loads EfficientNet-B0 with the same classifier head used in training.
-    Expects a state_dict saved via: torch.save(model.state_dict(), MODEL_PATH)
+    EfficientNet-B0 with binary head, loads state_dict.
+    Must match your training architecture.
     """
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(
-            f"Model file not found at '{MODEL_PATH}'. Ensure it exists in your repo."
+            f"Model file not found at '{MODEL_PATH}'. Upload it to GitHub at that path."
         )
 
     model = models.efficientnet_b0(weights=None)
 
-    # Binary classifier head (matches your notebook)
     in_features = model.classifier[1].in_features
     model.classifier = nn.Sequential(
         nn.Dropout(p=0.4, inplace=True),
@@ -151,11 +139,7 @@ def load_model() -> nn.Module:
 
 
 def predict_probs(pil_image: Image.Image) -> Dict[str, float]:
-    """
-    Returns class probabilities: {"No Tumor": p0, "Tumor": p1}
-    """
     model = load_model()
-
     img = pil_image.convert("RGB")
     x = transform(img).unsqueeze(0).to(DEVICE)
 
@@ -166,79 +150,127 @@ def predict_probs(pil_image: Image.Image) -> Dict[str, float]:
     return {"No Tumor": float(1.0 - p_tumor), "Tumor": float(p_tumor)}
 
 
-def tensor_to_rgb_float(image_tensor: torch.Tensor) -> np.ndarray:
+# =========================
+# Manual Grad-CAM (NO OpenCV)
+# =========================
+def _find_target_layer(model: nn.Module) -> nn.Module:
     """
-    Converts a normalized tensor (3,H,W) -> RGB float image (H,W,3) in [0,1]
+    Select a reasonable last convolutional-ish layer for EfficientNet.
+    We target model.features[-1] by default.
     """
-    x = image_tensor.detach().cpu().numpy().transpose(1, 2, 0).astype(np.float32)
+    try:
+        return model.features[-1]
+    except Exception:
+        # Fallback: pick last leaf module within features
+        for m in reversed(list(model.features.modules())):
+            if len(list(m.children())) == 0:
+                return m
+    raise RuntimeError("Could not locate a target layer for Grad-CAM.")
+
+
+def _tensor_to_rgb_float(x_norm: torch.Tensor) -> np.ndarray:
+    """
+    x_norm: normalized tensor (3,H,W)
+    Returns RGB float image (H,W,3) in [0,1]
+    """
+    x = x_norm.detach().cpu().numpy().transpose(1, 2, 0).astype(np.float32)
     x = (x * IMAGENET_STD) + IMAGENET_MEAN
     x = np.clip(x, 0.0, 1.0)
     return x
 
 
-def get_target_layer(model: nn.Module) -> nn.Module:
+def _resize_cam(cam: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     """
-    Attempts to select an appropriate target layer for Grad-CAM on EfficientNet.
-    Tries a couple of common choices for robustness.
+    Resize CAM using PIL (no cv2).
+    cam: (h,w) float
     """
-    # Common choice
-    try:
-        return model.features[-1]
-    except Exception:
-        pass
-
-    # Alternative choice some notebooks use
-    try:
-        return model.features[-1][0]
-    except Exception:
-        pass
-
-    # Last resort: any module inside features
-    for m in reversed(list(model.features.modules())):
-        # choose a non-container leaf module
-        if len(list(m.children())) == 0:
-            return m
-
-    raise RuntimeError("Could not determine a target layer for Grad-CAM.")
+    cam_img = Image.fromarray((cam * 255).astype(np.uint8))
+    cam_img = cam_img.resize((out_w, out_h), resample=Image.BILINEAR)
+    cam_resized = np.asarray(cam_img).astype(np.float32) / 255.0
+    return cam_resized
 
 
 def compute_gradcam_overlay(pil_image: Image.Image) -> np.ndarray:
     """
-    Computes Grad-CAM overlay image (RGB uint8) for the positive class "Tumor".
+    Returns an overlay image (H,W,3) uint8 with heatmap blended into the MRI.
     """
     model = load_model()
+    target_layer = _find_target_layer(model)
 
-    img = pil_image.convert("RGB")
-    x = transform(img)  # (3,H,W) normalized
-    input_tensor = x.unsqueeze(0).to(DEVICE)
+    activations = {}
+    gradients = {}
 
-    target_layer = get_target_layer(model)
-    cam = GradCAM(model=model, target_layers=[target_layer])
+    def fwd_hook(module, inp, out):
+        activations["value"] = out
 
-    # Positive class target (Tumor = 1)
-    targets = [BinaryClassifierOutputTarget(1)]
+    def bwd_hook(module, grad_in, grad_out):
+        gradients["value"] = grad_out[0]
 
-    # grayscale_cam shape: (H,W)
-    grayscale_cam = cam(input_tensor=input_tensor, targets=targets)[0]
+    # Register hooks
+    h1 = target_layer.register_forward_hook(fwd_hook)
+    h2 = target_layer.register_full_backward_hook(bwd_hook)
 
-    rgb_img = tensor_to_rgb_float(x)  # float in [0,1]
-    overlay = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)  # uint8 RGB
-    return overlay
+    try:
+        img = pil_image.convert("RGB")
+        x_norm = transform(img)  # (3,H,W)
+        input_tensor = x_norm.unsqueeze(0).to(DEVICE)
+
+        # Forward
+        logits = model(input_tensor).view(-1)  # shape (1,)
+        # For binary classifier, encourage "Tumor" (positive) output
+        score = logits[0]
+
+        # Backward
+        model.zero_grad(set_to_none=True)
+        score.backward(retain_graph=False)
+
+        A = activations["value"]          # (N,C,h,w)
+        dA = gradients["value"]           # (N,C,h,w)
+
+        # Global-average pool gradients -> weights
+        weights = torch.mean(dA, dim=(2, 3), keepdim=True)  # (N,C,1,1)
+
+        # Weighted sum of activations
+        cam = torch.sum(weights * A, dim=1)  # (N,h,w)
+        cam = torch.relu(cam)[0]             # (h,w)
+
+        # Normalize CAM
+        cam = cam - cam.min()
+        cam = cam / (cam.max() + 1e-8)
+        cam_np = cam.detach().cpu().numpy().astype(np.float32)
+
+        # Resize to image size
+        rgb_img = _tensor_to_rgb_float(x_norm)
+        H, W = rgb_img.shape[:2]
+        cam_resized = _resize_cam(cam_np, H, W)
+
+        # Create color heatmap using matplotlib colormap
+        heatmap = cm.get_cmap("jet")(cam_resized)[..., :3]  # (H,W,3) float [0,1]
+
+        # Blend
+        alpha = 0.45
+        overlay = (1 - alpha) * rgb_img + alpha * heatmap
+        overlay = np.clip(overlay, 0.0, 1.0)
+        overlay_uint8 = (overlay * 255).astype(np.uint8)
+
+        return overlay_uint8
+
+    finally:
+        # Remove hooks
+        h1.remove()
+        h2.remove()
 
 
 # =========================
-# Navigation State
+# Navigation
 # =========================
 if "page" not in st.session_state:
-    st.session_state.page = "home"  # "home" or "predict"
+    st.session_state.page = "home"
 
 
-# =========================
-# Pages
-# =========================
 def render_home() -> None:
     set_bg(BG_PATH)
-    inject_home_card_css()
+    inject_home_css()
 
     col_left, col_right = st.columns([1.25, 1])
 
@@ -248,20 +280,19 @@ def render_home() -> None:
         st.markdown(
             """
             <div class="subtitle">
-            This application demonstrates a deep-learning model (EfficientNet-based) that classifies brain MRI images into
-            <b>Tumor</b> vs <b>No Tumor</b>.
+            This web application demonstrates an EfficientNet-based deep learning model that classifies brain MRI images
+            as <b>Tumor</b> or <b>No Tumor</b>.
             <br><br>
-            <b>Workflow</b>
+            <b>Steps</b>
             <ol>
               <li>Click <b>Next</b></li>
               <li>Upload an MRI image (JPG/PNG)</li>
               <li>Press <b>Result</b> to view prediction</li>
-              <li>If the result is <b>Positive</b>, the app will show an <b>Explainable AI</b> heatmap (Grad-CAM)</li>
+              <li>If <b>Positive</b>, an Explainable AI heatmap (Grad-CAM) will be shown</li>
             </ol>
             </div>
             <div class="small-note">
-            Disclaimer: This is a research/educational demonstration and is not a medical device.
-            Do not use it for clinical diagnosis or treatment decisions.
+            Disclaimer: For educational/research purposes only. Not for medical diagnosis.
             </div>
             """,
             unsafe_allow_html=True,
@@ -271,21 +302,20 @@ def render_home() -> None:
         if st.button("Next →", type="primary"):
             st.session_state.page = "predict"
             st.rerun()
-
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col_right:
         st.markdown(
             """
             <div class="glass-card">
-              <h3 style="margin-top:0;">What you will see</h3>
+              <h3 style="margin-top:0;">Outputs</h3>
               <ul style="line-height:1.8;">
-                <li><b>Positive / Negative</b> result</li>
+                <li>Clear <b>Positive/Negative</b> decision</li>
                 <li>Class probabilities</li>
-                <li><b>Grad-CAM</b> explanation for Positive results</li>
+                <li><b>Grad-CAM</b> overlay for Positive results</li>
               </ul>
               <div class="small-note">
-                For best results, use clear MRI slices. The model output is probabilistic, not definitive.
+                The heatmap indicates model attention, not a clinical explanation.
               </div>
             </div>
             """,
@@ -304,11 +334,9 @@ def render_predict() -> None:
 
     st.title("Upload MRI and Get Result")
 
-    # Safety / UX: show model availability early
     if not os.path.exists(MODEL_PATH):
         st.error(
-            f"Model file not found at: `{MODEL_PATH}`. "
-            f"Upload your weights to GitHub at that path (or update MODEL_PATH)."
+            f"Model file not found: `{MODEL_PATH}`. Upload it to GitHub or update MODEL_PATH in app.py."
         )
         st.stop()
 
@@ -330,12 +358,11 @@ def render_predict() -> None:
         with st.spinner("Running inference..."):
             probs = predict_probs(img)
 
-        prob_tumor = probs["Tumor"]
-        is_positive = prob_tumor >= threshold
+        p_tumor = probs["Tumor"]
+        is_positive = p_tumor >= threshold
 
-        # Decision label + confidence
         decision = "Positive (Tumor)" if is_positive else "Negative (No Tumor)"
-        confidence = (prob_tumor if is_positive else probs["No Tumor"]) * 100.0
+        confidence = (p_tumor if is_positive else probs["No Tumor"]) * 100.0
 
         st.subheader("Result")
         if is_positive:
@@ -347,32 +374,21 @@ def render_predict() -> None:
             st.subheader("Probabilities")
             st.json(probs)
 
-        # XAI only if Positive
         if is_positive and show_xai:
-            st.subheader("Explainable AI (E-AI): Grad-CAM")
+            st.subheader("Explainable AI: Grad-CAM")
             st.write(
-                "The heatmap highlights regions that contributed most to the model’s **Tumor** decision. "
-                "Brighter areas indicate stronger influence."
+                "The heatmap highlights regions that contributed most to the **Tumor** decision. "
+                "Brighter regions indicate stronger influence."
             )
-            with st.spinner("Generating explanation (Grad-CAM)..."):
+            with st.spinner("Generating explanation..."):
                 try:
                     overlay = compute_gradcam_overlay(img)
-                    st.image(
-                        overlay,
-                        caption="Grad-CAM Overlay (Tumor Evidence Regions)",
-                        use_column_width=True,
-                    )
+                    st.image(overlay, caption="Grad-CAM Overlay (Tumor Evidence Regions)", use_column_width=True)
                 except Exception as e:
-                    st.warning(
-                        "Grad-CAM could not be generated (layer mismatch or dependency issue). "
-                        "Your prediction is still shown above."
-                    )
+                    st.warning("Could not generate Grad-CAM. Prediction is still valid.")
                     st.code(str(e))
 
 
-# =========================
-# Router
-# =========================
 if st.session_state.page == "home":
     render_home()
 else:
