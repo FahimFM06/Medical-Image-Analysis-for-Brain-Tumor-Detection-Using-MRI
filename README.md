@@ -133,16 +133,16 @@ User-adjustable settings:
 
 ## Model File Requirement
 
-The Streamlit app expects the trained model file to be available as:
-
 If the filename is different, update the `MODEL_PATH` variable in `app.py`.
 
 ---
 
 ## How to Run the Streamlit App
 
-```bash
-https://medical-image-analysis-for-brain-tumor-detection-using-mri.streamlit.app/
+You can access the deployed Streamlit application here:
+
+👉 **[Brain Tumor Detection Streamlit App](https://medical-image-analysis-for-brain-tumor-detection-using-mri.streamlit.app/)**
+
 
 
 
