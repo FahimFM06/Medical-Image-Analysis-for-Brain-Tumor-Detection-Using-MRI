@@ -142,7 +142,7 @@ If the filename is different, update the `MODEL_PATH` variable in `app.py`.
 ## How to Run the Streamlit App
 
 ```bash
-[streamlit run app.py](https://medical-image-analysis-for-brain-tumor-detection-using-mri.streamlit.app/)
+https://medical-image-analysis-for-brain-tumor-detection-using-mri.streamlit.app/
 
 
 
