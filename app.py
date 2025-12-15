@@ -1,6 +1,6 @@
 import os
 import base64
-from typing import Dict, Tuple
+from typing import Dict
 
 import streamlit as st
 import numpy as np
@@ -42,7 +42,7 @@ def set_bg(image_path: str) -> None:
         <style>
         .stApp {{
             background:
-              linear-gradient(rgba(0,0,0,0.60), rgba(0,0,0,0.60)),
+              linear-gradient(rgba(0,0,0,0.65), rgba(0,0,0,0.65)),
               url("data:image/jpg;base64,{b64}");
             background-size: cover;
             background-position: center;
@@ -54,34 +54,74 @@ def set_bg(image_path: str) -> None:
     )
 
 
-def inject_home_css() -> None:
+def inject_global_css() -> None:
     st.markdown(
         """
         <style>
+        /* Glass card + improved readability */
         .glass-card {
-            background: rgba(255,255,255,0.10);
-            border: 1px solid rgba(255,255,255,0.18);
-            box-shadow: 0 10px 35px rgba(0,0,0,0.35);
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
+            background: rgba(10, 18, 32, 0.72);
+            border: 1px solid rgba(255,255,255,0.16);
+            box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
             border-radius: 18px;
             padding: 28px;
-            color: white;
+            color: #F8FAFC;
         }
         .title {
             font-size: 44px;
-            font-weight: 750;
+            font-weight: 800;
             margin: 0 0 8px 0;
+            color: #F8FAFC;
+            text-shadow: 0 2px 12px rgba(0,0,0,0.55);
         }
         .subtitle {
             font-size: 18px;
-            line-height: 1.65;
-            opacity: 0.95;
+            line-height: 1.7;
+            color: rgba(248,250,252,0.92);
         }
         .small-note {
             font-size: 13px;
-            opacity: 0.85;
-            line-height: 1.55;
+            color: rgba(248,250,252,0.80);
+            line-height: 1.6;
+        }
+
+        /* Probability cards */
+        .prob-wrap {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 14px;
+            margin-top: 8px;
+        }
+        .prob-card {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 14px;
+            padding: 14px 14px 12px 14px;
+        }
+        .prob-label {
+            font-size: 14px;
+            color: rgba(248,250,252,0.85);
+            margin-bottom: 6px;
+        }
+        .prob-value {
+            font-size: 26px;
+            font-weight: 800;
+            color: #F8FAFC;
+            margin-bottom: 10px;
+        }
+        .prob-bar-bg {
+            height: 10px;
+            background: rgba(255,255,255,0.10);
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .prob-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: rgba(56,189,248,0.95);
+            border-radius: 999px;
         }
         </style>
         """,
@@ -150,6 +190,28 @@ def predict_probs(pil_image: Image.Image) -> Dict[str, float]:
     return {"No Tumor": float(1.0 - p_tumor), "Tumor": float(p_tumor)}
 
 
+def render_probabilities_card(probs: Dict[str, float]) -> None:
+    no_tumor = float(np.clip(probs.get("No Tumor", 0.0), 0.0, 1.0))
+    tumor = float(np.clip(probs.get("Tumor", 0.0), 0.0, 1.0))
+
+    html = f"""
+    <div class="prob-wrap">
+      <div class="prob-card">
+        <div class="prob-label">No Tumor</div>
+        <div class="prob-value">{no_tumor*100:.2f}%</div>
+        <div class="prob-bar-bg"><div class="prob-bar-fill" style="width:{no_tumor*100:.2f}%"></div></div>
+      </div>
+
+      <div class="prob-card">
+        <div class="prob-label">Tumor</div>
+        <div class="prob-value">{tumor*100:.2f}%</div>
+        <div class="prob-bar-bg"><div class="prob-bar-fill" style="width:{tumor*100:.2f}%"></div></div>
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 # =========================
 # Manual Grad-CAM (NO OpenCV)
 # =========================
@@ -161,7 +223,6 @@ def _find_target_layer(model: nn.Module) -> nn.Module:
     try:
         return model.features[-1]
     except Exception:
-        # Fallback: pick last leaf module within features
         for m in reversed(list(model.features.modules())):
             if len(list(m.children())) == 0:
                 return m
@@ -206,7 +267,6 @@ def compute_gradcam_overlay(pil_image: Image.Image) -> np.ndarray:
     def bwd_hook(module, grad_in, grad_out):
         gradients["value"] = grad_out[0]
 
-    # Register hooks
     h1 = target_layer.register_forward_hook(fwd_hook)
     h2 = target_layer.register_full_backward_hook(bwd_hook)
 
@@ -215,39 +275,29 @@ def compute_gradcam_overlay(pil_image: Image.Image) -> np.ndarray:
         x_norm = transform(img)  # (3,H,W)
         input_tensor = x_norm.unsqueeze(0).to(DEVICE)
 
-        # Forward
         logits = model(input_tensor).view(-1)  # shape (1,)
-        # For binary classifier, encourage "Tumor" (positive) output
-        score = logits[0]
+        score = logits[0]  # encourage Tumor (positive)
 
-        # Backward
         model.zero_grad(set_to_none=True)
         score.backward(retain_graph=False)
 
         A = activations["value"]          # (N,C,h,w)
         dA = gradients["value"]           # (N,C,h,w)
 
-        # Global-average pool gradients -> weights
         weights = torch.mean(dA, dim=(2, 3), keepdim=True)  # (N,C,1,1)
-
-        # Weighted sum of activations
         cam = torch.sum(weights * A, dim=1)  # (N,h,w)
         cam = torch.relu(cam)[0]             # (h,w)
 
-        # Normalize CAM
         cam = cam - cam.min()
         cam = cam / (cam.max() + 1e-8)
         cam_np = cam.detach().cpu().numpy().astype(np.float32)
 
-        # Resize to image size
         rgb_img = _tensor_to_rgb_float(x_norm)
         H, W = rgb_img.shape[:2]
         cam_resized = _resize_cam(cam_np, H, W)
 
-        # Create color heatmap using matplotlib colormap
         heatmap = cm.get_cmap("jet")(cam_resized)[..., :3]  # (H,W,3) float [0,1]
 
-        # Blend
         alpha = 0.45
         overlay = (1 - alpha) * rgb_img + alpha * heatmap
         overlay = np.clip(overlay, 0.0, 1.0)
@@ -256,7 +306,6 @@ def compute_gradcam_overlay(pil_image: Image.Image) -> np.ndarray:
         return overlay_uint8
 
     finally:
-        # Remove hooks
         h1.remove()
         h2.remove()
 
@@ -270,7 +319,7 @@ if "page" not in st.session_state:
 
 def render_home() -> None:
     set_bg(BG_PATH)
-    inject_home_css()
+    inject_global_css()
 
     col_left, col_right = st.columns([1.25, 1])
 
@@ -308,8 +357,8 @@ def render_home() -> None:
         st.markdown(
             """
             <div class="glass-card">
-              <h3 style="margin-top:0;">Outputs</h3>
-              <ul style="line-height:1.8;">
+              <h3 style="margin-top:0; color:#F8FAFC;">Outputs</h3>
+              <ul style="line-height:1.8; color:rgba(248,250,252,0.92);">
                 <li>Clear <b>Positive/Negative</b> decision</li>
                 <li>Class probabilities</li>
                 <li><b>Grad-CAM</b> overlay for Positive results</li>
@@ -325,6 +374,7 @@ def render_home() -> None:
 
 def render_predict() -> None:
     set_predict_bg()
+    inject_global_css()
 
     top = st.columns([1, 2, 1])
     with top[0]:
@@ -372,7 +422,7 @@ def render_predict() -> None:
 
         if show_probs:
             st.subheader("Probabilities")
-            st.json(probs)
+            render_probabilities_card(probs)
 
         if is_positive and show_xai:
             st.subheader("Explainable AI: Grad-CAM")
