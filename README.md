@@ -35,3 +35,114 @@ https://www.kaggle.com/datasets/navoneel/brain-mri-images-for-brain-tumor-detect
 
 Expected dataset structure:
 
+Class mapping:
+
+- `no`  → 0  
+- `yes` → 1  
+
+---
+
+## Model Architecture
+
+- Base model: **EfficientNet-B0**
+- Pretrained on: **ImageNet**
+- Final classifier:
+  - Dropout (0.4)
+  - Fully connected layer with **1 output neuron**
+- Task type: **Binary Classification**
+
+---
+
+## Training Details
+
+- Image size: **224 × 224**
+- Loss function: **BCEWithLogitsLoss**
+- Optimizer: **Adam**
+- Learning rate scheduler: **Cosine Annealing**
+- Epochs: **20**
+- Best model selected using **validation accuracy**
+
+---
+
+## Data Splitting
+
+The dataset is split using **stratified sampling**:
+
+- **Training set**: 70%
+- **Validation set**: 15%
+- **Test set**: 15%
+
+This ensures balanced class distribution in all splits.
+
+---
+
+## Evaluation Metrics
+
+Model performance is evaluated using:
+
+- **Classification Report**
+  - Precision
+  - Recall
+  - F1-score
+- **Confusion Matrix**
+
+---
+
+## Explainable AI (XAI)
+
+This project uses **Grad-CAM** to explain model predictions.
+
+Two approaches are implemented:
+
+1. **Custom Grad-CAM** (manual gradient and activation hooks)
+2. **pytorch-grad-cam library**
+   - GradCAM
+   - GradCAM++
+   - ScoreCAM
+
+Grad-CAM heatmaps highlight important regions that influenced the **Tumor** prediction.
+
+---
+
+## Streamlit Web Application
+
+The Streamlit application allows users to interact with the trained model.
+
+### Home Page
+
+- Project description
+- Instructions
+- Navigation to prediction page
+
+### Prediction Page
+
+- Upload MRI image (JPG / PNG)
+- View:
+  - **Positive (Tumor)** or **Negative (No Tumor)**
+  - Prediction confidence
+  - Class probabilities
+  - **Grad-CAM visualization (only if Tumor is detected)**
+
+User-adjustable settings:
+
+- Tumor decision threshold
+- Show / hide probabilities
+- Show / hide Grad-CAM
+
+---
+
+## Model File Requirement
+
+The Streamlit app expects the trained model file to be available as:
+
+If the filename is different, update the `MODEL_PATH` variable in `app.py`.
+
+---
+
+## How to Run the Streamlit App
+
+```bash
+streamlit run app.py
+
+
+
